@@ -16,15 +16,10 @@ package terminfo
 
 import (
 	"bytes"
-	"compress/gzip"
-	"crypto/sha1"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -717,41 +712,6 @@ func AddTerminfo(t *Terminfo) {
 	dblock.Unlock()
 }
 
-func loadFromFile(fname string, term string) (*Terminfo, error) {
-	var e error
-	var f io.Reader
-	if f, e = os.Open(fname); e != nil {
-		return nil, e
-	}
-	if strings.HasSuffix(fname, ".gz") {
-		if f, e = gzip.NewReader(f); e != nil {
-			return nil, e
-		}
-	}
-	d := json.NewDecoder(f)
-	for {
-		t := &Terminfo{}
-		if e := d.Decode(t); e != nil {
-			if e == io.EOF {
-				return nil, ErrTermNotFound
-			}
-			return nil, e
-		}
-		if t.SetCursor == "" {
-			// This must be an alias record, return it.
-			return t, nil
-		}
-		if t.Name == term {
-			return t, nil
-		}
-		for _, a := range t.Aliases {
-			if a == term {
-				return t, nil
-			}
-		}
-	}
-}
-
 // LookupTerminfo attempts to find a definition for the named $TERM.
 // It first looks in the builtin database, which should cover just about
 // everyone.  If it can't find one there, then it will attempt to read
@@ -780,98 +740,6 @@ func LookupTerminfo(name string) (*Terminfo, error) {
 	dblock.Lock()
 	t := terminfos[name]
 	dblock.Unlock()
-
-	if t == nil {
-
-		var files []string
-		letter := fmt.Sprintf("%02x", name[0])
-		gzfile := path.Join(letter, name+".gz")
-		jsfile := path.Join(letter, name)
-		hash := fmt.Sprintf("%x", sha1.Sum([]byte(name)))
-		gzhfile := path.Join(hash[0:2], hash[0:8]+".gz")
-		jshfile := path.Join(hash[0:2], hash[0:8])
-
-		// Build up the search path.  Old versions of tcell used a
-		// single database file, whereas the new ones locate them
-		// in JSON (optionally compressed) files.
-		//
-		// The search path for "xterm" (SHA1 sig e2e28a8e...) looks
-		// like this:
-		//
-		// $TCELLDB/78/xterm.gz
-		// $TCELLDB/78/xterm
-		// $TCELLDB
-		// $HOME/.tcelldb/e2/e2e28a8e.gz
-		// $HOME/.tcelldb/e2/e2e28a8e
-		// $HOME/.tcelldb/78/xterm.gz
-		// $HOME/.tcelldb/78/xterm
-		// $HOME/.tcelldb
-		// $GOPATH/terminfo/database/e2/e2e28a8e.gz
-		// $GOPATH/terminfo/database/e2/e2e28a8e
-		// $GOPATH/terminfo/database/78/xterm.gz
-		// $GOPATH/terminfo/database/78/xterm
-		//
-		// Note that the legacy name lookups (78/xterm etc.) are
-		// provided for compatibility.  We do not actually deliver
-		// any files with this style of naming, to avoid collisions
-		// on case insensitive filesystems. (*cough* mac *cough*).
-
-		// If $GOPATH set, honor it, else assume $HOME/go just like
-		// modern golang does.
-		gopath := os.Getenv("GOPATH")
-		if gopath == "" {
-			gopath = path.Join(os.Getenv("HOME"), "go")
-		}
-		if pth := os.Getenv("TCELLDB"); pth != "" {
-			files = append(files,
-				path.Join(pth, gzfile),
-				path.Join(pth, jsfile),
-				pth)
-		}
-		if pth := os.Getenv("HOME"); pth != "" {
-			pth = path.Join(pth, ".tcelldb")
-			files = append(files,
-				path.Join(pth, gzhfile),
-				path.Join(pth, jshfile),
-				path.Join(pth, gzfile),
-				path.Join(pth, jsfile),
-				pth)
-		}
-
-		for _, pth := range filepath.SplitList(gopath) {
-			pth = path.Join(pth, "src", "github.com",
-				"gdamore", "tcell", "terminfo", "database")
-			files = append(files,
-				path.Join(pth, gzhfile),
-				path.Join(pth, jshfile),
-				path.Join(pth, gzfile),
-				path.Join(pth, jsfile))
-		}
-
-		for _, fname := range files {
-			t, _ = loadFromFile(fname, name)
-			if t != nil {
-				break
-			}
-		}
-		if t != nil {
-			if t.Name != name {
-				// Check for a database loop (no infinite
-				// recursion).
-				dblock.Lock()
-				if aliases[name] != "" {
-					dblock.Unlock()
-					return nil, ErrTermNotFound
-				}
-				aliases[name] = t.Name
-				dblock.Unlock()
-				return LookupTerminfo(t.Name)
-			}
-			dblock.Lock()
-			terminfos[name] = t
-			dblock.Unlock()
-		}
-	}
 
 	// If the name ends in -truecolor, then fabricate an entry
 	// from the corresponding -256color, -color, or bare terminal.
